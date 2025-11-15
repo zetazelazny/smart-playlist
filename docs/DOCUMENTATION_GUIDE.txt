@@ -1,0 +1,94 @@
+## 📖 Documentation Guide
+
+All project documentation is now consolidated into **one comprehensive file**:
+
+### 🎯 PRIMARY REFERENCE
+**`PROJECT_DOCUMENTATION.md`** - Complete project guide including:
+- Executive summary
+- Feature list (current + planned)
+- Technical stack details
+- Database schema
+- Data flow diagrams
+- API limitations & workarounds
+- How to use the application
+- Troubleshooting guide
+- Development roadmap
+- Complete file manifest
+
+**👉 Start here for ANY question about the project**
+
+---
+
+### 📚 SECONDARY REFERENCES
+
+**`README.md`** - Quick start overview
+- Setup instructions
+- 4-step getting started
+- Feature highlights
+- File locations
+
+**`QUICK_START.md`** - Step-by-step setup guide
+- Alternative to README.md
+- Use if you prefer detailed walkthrough
+
+---
+
+### 🗑️ REMOVED DOCUMENTATION
+
+The following files were consolidated into `PROJECT_DOCUMENTATION.md`:
+- ❌ CURRENT_STATUS.md
+- ❌ API_LIMITATION_RESOLUTION.md
+- ❌ SPOTIFY_API_LIMITATION.md
+- ❌ AUTH_IMPROVEMENTS.md
+- ❌ LOGIN_FLOW_IMPROVEMENTS.txt
+- ❌ LOGIN_FLOW_SUMMARY.md
+- ❌ IMPROVEMENTS.md
+- ❌ APP_NAVIGATION_GUIDE.md
+- ❌ TAGGING_APP_GUIDE.md
+
+All information from these files is now in `PROJECT_DOCUMENTATION.md`.
+
+---
+
+## 🎓 What Goes Where
+
+**"How do I set up the project?"**
+→ README.md or QUICK_START.md
+
+**"What are all the features?"**
+→ PROJECT_DOCUMENTATION.md (Features section)
+
+**"What's the database schema?"**
+→ PROJECT_DOCUMENTATION.md (Data Model section)
+
+**"Why can't I get 300 songs?"**
+→ PROJECT_DOCUMENTATION.md (Spotify API Limitation section)
+
+**"How do I tag moods?"**
+→ PROJECT_DOCUMENTATION.md (How to Use section)
+
+**"What should I build next?"**
+→ PROJECT_DOCUMENTATION.md (Future Development section)
+
+**"I have a bug, what do I do?"**
+→ PROJECT_DOCUMENTATION.md (Debugging section)
+
+---
+
+## 📊 File Summary
+
+| File | Type | Purpose |
+|------|------|---------|
+| `PROJECT_DOCUMENTATION.md` | Docs | Complete reference (MAIN) |
+| `README.md` | Docs | Quick start |
+| `QUICK_START.md` | Docs | Setup guide |
+| `app.py` | Code | FastAPI backend |
+| `streamlit_tag.py` | Code | Main UI |
+| `ingest.py` | Code | Data collection |
+| `db_utils.py` | Code | Database ops |
+| `requirements.txt` | Config | Dependencies |
+| `.env.example` | Config | Config template |
+
+---
+
+**Last Updated**: November 15, 2025

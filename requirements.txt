@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+streamlit==1.32.2
+gitpython
+pydeck
+tenacity
+toml
+altair==5.2.0
+python-dotenv
+spotipy
+sqlalchemy
+aiosqlite
+requests
