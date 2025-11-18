@@ -72,6 +72,34 @@ def add_tracks_to_playlist(access_token, playlist_id, uris):
     except requests.exceptions.HTTPError as e:
         logger.error(f"HTTP error adding tracks: {e.response.status_code} - {e.response.text}")
         raise
+
+def get_artist(access_token, artist_id):
+    """Fetch an artist object from Spotify (includes genres)"""
+    try:
+        if not access_token or not artist_id:
+            raise ValueError("access_token and artist_id are required")
+        url = f"https://api.spotify.com/v1/artists/{artist_id}"
+        headers = {"Authorization": f"Bearer {access_token}"}
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        return r.json()
+    except requests.exceptions.Timeout:
+        logger.error("Timeout fetching artist")
+        raise
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"HTTP error fetching artist: {e.response.status_code} - {e.response.text}")
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error fetching artist: {e}")
+        raise
+
+def get_artist_genres(access_token, artist_id):
+    """Return a list of genres for the given artist id (may be empty)"""
+    try:
+        artist = get_artist(access_token, artist_id)
+        return artist.get("genres", []) if artist else []
+    except Exception:
+        return []
     except ValueError as e:
         logger.error(f"Validation error: {e}")
         raise

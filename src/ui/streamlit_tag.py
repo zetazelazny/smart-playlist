@@ -4,15 +4,28 @@ import os
 import logging
 import sys
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# Add backend to path for imports
+backend_path = os.path.join(os.path.dirname(__file__), "..", "backend")
+sys.path.insert(0, backend_path)
+
+# Import database utilities
+from db_utils import create_tables
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Timezone for Argentina (UTC-3)
+ARGENTINA_TZ = timezone(timedelta(hours=-3))
+
 # Configuration
 FASTAPI_URL = os.getenv("FASTAPI_URL", "http://127.0.0.1:8000")
 DB = os.getenv("DATABASE_URL", "sqlite:///./db.sqlite").replace("sqlite:///./", "./")
+
+# Ensure database tables exist with proper schema
+create_tables()
 
 # Page configuration
 st.set_page_config(
@@ -120,13 +133,13 @@ def download_new_information():
             is_first_download = True
         
         # Import and run ingest
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        backend_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend")
+        sys.path.insert(0, backend_path)
         from ingest import main as ingest_main
         
-        # Fetch from Spotify (max 50 items due to API limitation)
+        # Fetch from Spotify
         if is_first_download:
-            st.info("🎵 First download: Getting your recently played songs (max 50 available from Spotify)...")
-            st.warning("⚠️ Spotify API limits recently-played history to 50 songs. This is a Spotify limitation, not a bug.")
+            st.info("🎵 First download: Getting your recently played songs...")
             logger.info("Calling ingest with initial_download=True")
             ingest_main(initial_download=True)
         else:
@@ -166,7 +179,7 @@ def get_untagged_plays(limit=10, offset=0):
         
         # Get plays where ANY tag is missing with pagination
         cur.execute("""
-            SELECT p.id, p.played_at, t.track_name, t.artist, p.mood_tag, p.mood_when_listening, p.theme_tag
+            SELECT p.id, p.track_id, p.played_at, t.track_name, t.artist, t.duration_ms, p.mood_tag, p.mood_when_listening, p.theme_tag
             FROM plays p
             JOIN tracks t ON p.track_id = t.track_id
             WHERE p.mood_tag IS NULL OR p.mood_when_listening IS NULL OR p.theme_tag IS NULL
@@ -238,6 +251,66 @@ def get_database_tables():
         logger.error(f"Database error: {e}")
         return []
 
+def detect_skipped(play_id, played_at, duration_ms):
+    """Detect if a song was skipped based on time between plays and song duration.
+    
+    A song is considered skipped only if the next song started significantly before 
+    the current song would have ended, accounting for natural gaps and pauses.
+    
+    Conservative approach: Only mark as skipped if gap is < 50% of song duration.
+    This means the next song started before the current song was even halfway done.
+    This accounts for natural pauses between songs, playlist transitions, buffer time, etc.
+    
+    Returns: (was_skipped: bool, skip_indicator: str)
+    """
+    try:
+        conn = sqlite3.connect(DB)
+        cur = conn.cursor()
+        
+        # Get the next play after this one
+        cur.execute("""
+            SELECT played_at FROM plays 
+            WHERE played_at > ?
+            ORDER BY played_at ASC
+            LIMIT 1
+        """, (played_at,))
+        
+        result = cur.fetchone()
+        conn.close()
+        
+        if not result:
+            # No next song recorded, can't determine if skipped
+            return False, "⏸️ (unknown)"
+        
+        next_played_at = result[0]
+        
+        # Parse timestamps (ISO format from Spotify)
+        from datetime import datetime
+        current_time = datetime.fromisoformat(played_at.replace('Z', '+00:00'))
+        next_time = datetime.fromisoformat(next_played_at.replace('Z', '+00:00'))
+        
+        # Calculate time between songs in seconds
+        time_between = (next_time - current_time).total_seconds()
+        
+        # Duration is in milliseconds
+        song_duration_seconds = (duration_ms / 1000) if duration_ms else 0
+        
+        # Only mark as skipped if next song started before 50% of current song was played
+        # This is much more conservative and accounts for:
+        # - Natural pauses between songs (1-5 seconds)
+        # - Playlist transitions
+        # - Buffer/loading time
+        skip_threshold = song_duration_seconds * 0.5
+        
+        if time_between < skip_threshold:
+            return True, "⏭️ (skipped)"
+        else:
+            return False, "✅ (played)"
+            
+    except Exception as e:
+        logger.warning(f"Could not determine skip status: {e}")
+        return False, "❓ (unknown)"
+
 # Check authentication on every page load
 if not st.session_state.authenticated:
     if check_token_validity():
@@ -269,7 +342,7 @@ with st.sidebar:
 st.markdown("---")
 
 # Create tabs
-tab1, tab2, tab3 = st.tabs(["🎵 Mood Tagging", "📊 Database Viewer", "📥 Data Management"])
+tab1, tab2, tab3, tab4 = st.tabs(["🎵 Mood Tagging", "📊 Database Viewer", "📥 Data Management", "📋 Tagged Songs"])
 
 # TAB 1: Mood Tagging
 with tab1:
@@ -349,8 +422,11 @@ with tab1:
         
         for i, play in enumerate(untagged):
             with st.container(border=True):
+                # Detect if song was skipped
+                was_skipped, skip_indicator = detect_skipped(play['id'], play['played_at'], play['duration_ms'])
+                
                 # Header with song info
-                st.write(f"**{play['track_name']}**")
+                st.write(f"**{play['track_name']}** {skip_indicator}")
                 st.write(f"*{play['artist']}*")
                 try:
                     from datetime import datetime as dt
@@ -405,13 +481,17 @@ with tab1:
                     try:
                         conn = sqlite3.connect(DB)
                         cur = conn.cursor()
+                        # Convert boolean to 0/1 for SQLite
+                        skip_value = 1 if was_skipped else 0
+                        # Use Argentina timezone (UTC-3)
+                        tagged_time = datetime.now(ARGENTINA_TZ).isoformat()
                         cur.execute(
-                            "UPDATE plays SET mood_tag = ?, mood_when_listening = ?, theme_tag = ?, tagged_at = ? WHERE id = ?",
-                            (song_mood_value, listening_mood_value, theme_value, datetime.now().isoformat(), play['id'])
+                            "UPDATE plays SET mood_tag = ?, mood_when_listening = ?, theme_tag = ?, is_skipped = ?, tagged_at = ? WHERE id = ?",
+                            (song_mood_value, listening_mood_value, theme_value, skip_value, tagged_time, play['id'])
                         )
                         conn.commit()
                         conn.close()
-                        st.success(f"✅ Tagged! Song: {song_mood} | You: {listening_mood} | Theme: {theme_value}")
+                        st.success(f"✅ Tagged! Song: {song_mood} | You: {listening_mood} | Theme: {theme_value} | {skip_indicator}")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Error saving tags: {e}")
@@ -510,5 +590,149 @@ with tab3:
                 else:
                     st.error(f"❌ Download failed: {st.session_state.download_status}")
 
-    with col2:
-        st.metric("Downloads", "1", delta=None)
+# TAB 4: Tagged Songs
+with tab4:
+    st.subheader("📋 All Tagged Songs")
+    st.write("View all songs you've tagged with their listening and tagging timestamps (UTC-3 Argentina time)")
+    
+    try:
+        conn = sqlite3.connect(DB)
+        cur = conn.cursor()
+        
+        # Get all tagged songs with track info
+        cur.execute("""
+            SELECT 
+                p.id,
+                t.track_name,
+                t.artist,
+                p.played_at,
+                p.tagged_at,
+                CASE 
+                    WHEN p.mood_tag = 1 THEN '😢 Very Sad'
+                    WHEN p.mood_tag = 2 THEN '😕 Sad'
+                    WHEN p.mood_tag = 3 THEN '😐 Neutral'
+                    WHEN p.mood_tag = 4 THEN '🙂 Happy'
+                    WHEN p.mood_tag = 5 THEN '😄 Very Happy'
+                    ELSE '❓ Not Tagged'
+                END as song_mood,
+                CASE 
+                    WHEN p.mood_when_listening = 1 THEN '😢 Very Sad'
+                    WHEN p.mood_when_listening = 2 THEN '😕 Sad'
+                    WHEN p.mood_when_listening = 3 THEN '😐 Neutral'
+                    WHEN p.mood_when_listening = 4 THEN '🙂 Happy'
+                    WHEN p.mood_when_listening = 5 THEN '😄 Very Happy'
+                    ELSE '❓ Not Tagged'
+                END as listening_mood,
+                p.theme_tag,
+                CASE 
+                    WHEN p.is_skipped = 1 THEN '⏭️ Skipped'
+                    WHEN p.is_skipped = 0 THEN '✅ Completed'
+                    ELSE '❓ Unknown'
+                END as play_status
+            FROM plays p
+            JOIN tracks t ON p.track_id = t.track_id
+            WHERE p.mood_tag IS NOT NULL OR p.mood_when_listening IS NOT NULL OR p.theme_tag IS NOT NULL
+            ORDER BY p.played_at DESC
+        """)
+        
+        raw_songs = cur.fetchall()
+        conn.close()
+        
+        # Convert timestamps to UTC-3
+        def convert_timestamp(ts_str):
+            """Convert UTC timestamp to UTC-3 (Argentina)"""
+            if not ts_str:
+                return "N/A"
+            try:
+                if 'T' in ts_str and '+' not in ts_str and 'Z' not in ts_str:
+                    # Already in local time
+                    return ts_str[:19]  # Return without microseconds
+                # Convert from UTC to UTC-3
+                dt_utc = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+                dt_arg = dt_utc.astimezone(ARGENTINA_TZ)
+                return dt_arg.strftime("%Y-%m-%d %H:%M:%S")
+            except:
+                return ts_str[:19] if ts_str else "N/A"
+        
+        # Transform data with converted timestamps
+        tagged_songs = []
+        for song in raw_songs:
+            played_converted = convert_timestamp(song[3])
+            tagged_converted = convert_timestamp(song[4])
+            tagged_songs.append((
+                song[0], song[1], song[2],  # id, track, artist
+                played_converted, tagged_converted,  # converted timestamps
+                song[5], song[6], song[7], song[8]  # moods, theme, status
+            ))
+        
+        if tagged_songs:
+            # Display statistics
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Tagged", len(tagged_songs))
+            with col2:
+                skipped_count = sum(1 for song in tagged_songs if song[8] == '⏭️ Skipped')
+                st.metric("Skipped", skipped_count)
+            with col3:
+                completed_count = sum(1 for song in tagged_songs if song[8] == '✅ Completed')
+                st.metric("Completed", completed_count)
+            
+            st.markdown("---")
+            
+            # Display options
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                search_query = st.text_input("🔍 Search songs (artist or title):", "")
+            with col2:
+                show_csv = st.checkbox("📥 Export as CSV", value=False)
+            
+            # Filter data if search query provided
+            filtered_songs = tagged_songs
+            if search_query:
+                filtered_songs = [
+                    song for song in tagged_songs 
+                    if search_query.lower() in song[1].lower() or search_query.lower() in song[2].lower()
+                ]
+                st.caption(f"Found {len(filtered_songs)} matching songs")
+            
+            if show_csv:
+                # Convert to DataFrame for CSV export
+                import pandas as pd
+                df = pd.DataFrame(
+                    filtered_songs,
+                    columns=["ID", "Track", "Artist", "Listened At", "Tagged At", "Song Mood", "Your Mood", "Theme", "Play Status"]
+                )
+                st.dataframe(df, use_container_width=True)
+                
+                csv = df.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download as CSV",
+                    data=csv,
+                    file_name="tagged_songs_export.csv",
+                    mime="text/csv"
+                )
+            else:
+                # Display as interactive table
+                import pandas as pd
+                df = pd.DataFrame(
+                    filtered_songs,
+                    columns=["ID", "Track", "Artist", "Listened At", "Tagged At", "Song Mood", "Your Mood", "Theme", "Play Status"]
+                )
+                
+                # Format the dataframe for better display
+                st.dataframe(
+                    df,
+                    use_container_width=True,
+                    height=600,
+                    column_config={
+                        "Listened At": st.column_config.TextColumn(width="medium"),
+                        "Tagged At": st.column_config.TextColumn(width="medium"),
+                        "Track": st.column_config.TextColumn(width="large"),
+                        "Artist": st.column_config.TextColumn(width="medium"),
+                    }
+                )
+        else:
+            st.info("📭 No tagged songs yet. Start tagging in the 'Mood Tagging' tab!")
+    
+    except Exception as e:
+        st.error(f"Error loading tagged songs: {e}")

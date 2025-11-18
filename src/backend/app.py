@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from spotipy import Spotify
 from spotipy.oauth2 import SpotifyOAuth
 import os
@@ -60,11 +60,55 @@ def callback(request: Request):
         
         if error:
             logger.warning(f"OAuth error: {error}")
-            raise HTTPException(status_code=400, detail=f"Spotify authorization denied: {error}")
+            error_html = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Authentication Error</title>
+                <style>
+                    body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }}
+                    .container {{ text-align: center; background: white; padding: 40px; border-radius: 10px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); max-width: 400px; }}
+                    h1 {{ color: #d32f2f; margin-bottom: 10px; font-size: 28px; }}
+                    p {{ color: #666; margin: 10px 0; }}
+                    .error-code {{ color: #999; font-size: 14px; margin-top: 20px; background: #f5f5f5; padding: 10px; border-radius: 5px; }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1>❌ Authentication Error</h1>
+                    <p>There was a problem with Spotify authentication.</p>
+                    <div class="error-code">Error: {error}</div>
+                    <p>Please try logging in again.</p>
+                </div>
+            </body>
+            </html>
+            """
+            return HTMLResponse(content=error_html, status_code=400)
         
         if not code:
             logger.warning("No authorization code provided in callback")
-            raise HTTPException(status_code=400, detail="No authorization code provided")
+            error_html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Authentication Error</title>
+                <style>
+                    body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }}
+                    .container {{ text-align: center; background: white; padding: 40px; border-radius: 10px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); max-width: 400px; }}
+                    h1 {{ color: #d32f2f; margin-bottom: 10px; font-size: 28px; }}
+                    p {{ color: #666; margin: 10px 0; }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1>❌ Authentication Error</h1>
+                    <p>No authorization code provided.</p>
+                    <p>Please try logging in again.</p>
+                </div>
+            </body>
+            </html>
+            """
+            return HTMLResponse(content=error_html, status_code=400)
 
         sp_oauth = SpotifyOAuth(
             client_id=SPOTIFY_CLIENT_ID,
@@ -76,10 +120,41 @@ def callback(request: Request):
         save_token(token_info)
         
         logger.info("User authenticated successfully")
-        return JSONResponse({
-            "message": "Autenticación exitosa. Podés cerrar esta ventana.",
-            "status": "authenticated"
-        })
+        success_html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Authentication Successful</title>
+            <style>
+                body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: linear-gradient(135deg, #1DB954 0%, #1aa34a 100%); }}
+                .container {{ text-align: center; background: white; padding: 40px; border-radius: 10px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); max-width: 400px; }}
+                h1 {{ color: #1DB954; margin-bottom: 10px; font-size: 28px; }}
+                p {{ color: #666; margin: 10px 0; line-height: 1.6; }}
+                .spinner {{ border: 4px solid #f3f3f3; border-top: 4px solid #1DB954; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 20px auto; }}
+                @keyframes spin {{ 0% {{ transform: rotate(0deg); }} 100% {{ transform: rotate(360deg); }} }}
+                .note {{ font-size: 12px; color: #999; margin-top: 20px; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>✅ Authentication Successful!</h1>
+                <p>You have been authenticated with Spotify.</p>
+                <div class="spinner"></div>
+                <p>Closing this window in 3 seconds...</p>
+                <p class="note">If the window doesn't close, you can safely close it manually.</p>
+            </div>
+            <script>
+                // Close the window after 3 seconds
+                setTimeout(function() {
+                    window.close();
+                }, 3000);
+                // Fallback: Try to close it immediately as well (some browsers require user interaction)
+                // window.close();
+            </script>
+        </body>
+        </html>
+        """
+        return HTMLResponse(content=success_html)
     except HTTPException:
         raise
     except Exception as e:

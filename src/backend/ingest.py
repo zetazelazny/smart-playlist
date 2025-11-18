@@ -13,6 +13,7 @@ DB = os.getenv("DATABASE_URL", "sqlite:///./db.sqlite").replace("sqlite:///./","
 from auth_helpers import refresh_access_token
 from token_manager import load_token
 from db_utils import create_tables
+from spotify_ops import get_artist_genres
 
 def get_recently_played(access_token, limit=50):
     """Fetch recently played tracks from Spotify (single page)"""
@@ -147,6 +148,61 @@ def get_audio_features(access_token, ids):
         logger.error(f"Error fetching audio features: {e}")
         raise
 
+def deduplicate_consecutive_plays(items):
+    """Remove consecutive duplicate plays of the same song (pauses/replays).
+    
+    If the same track_id appears multiple times in a row within a short timeframe (5 minutes),
+    keep only the first occurrence and use the latest timestamp as the actual play time.
+    This treats pause/resume as a single play session.
+    
+    Args:
+        items: List of play items from Spotify API
+        
+    Returns:
+        Deduplicated list of items
+    """
+    if not items:
+        return items
+    
+    deduplicated = []
+    i = 0
+    
+    while i < len(items):
+        current_item = items[i]
+        current_track_id = current_item["track"]["id"]
+        current_played_at = current_item["played_at"]
+        
+        # Check if next items are the same track
+        j = i + 1
+        last_played_at = current_played_at
+        
+        while j < len(items):
+            next_item = items[j]
+            next_track_id = next_item["track"]["id"]
+            next_played_at = next_item["played_at"]
+            
+            # Check if same track and within 5 minutes
+            from datetime import datetime as dt, timedelta
+            current_time = dt.fromisoformat(current_played_at.replace('Z', '+00:00'))
+            next_time = dt.fromisoformat(next_played_at.replace('Z', '+00:00'))
+            time_diff = (current_time - next_time).total_seconds()
+            
+            if next_track_id == current_track_id and abs(time_diff) < 300:  # 5 minutes
+                logger.info(f"Found duplicate play: {current_track_id} at {current_played_at} and {next_played_at}")
+                last_played_at = next_played_at  # Update to the latest occurrence
+                j += 1
+            else:
+                break
+        
+        # Use the earliest played_at timestamp (first play) for skip detection accuracy
+        deduplicated.append(current_item)
+        i = j if j > i + 1 else i + 1
+    
+    if len(deduplicated) < len(items):
+        logger.info(f"Deduplicated {len(items) - len(deduplicated)} consecutive duplicate plays")
+    
+    return deduplicated
+
 def main(fetch_all=True, initial_download=False, limit=None):
     """Main ingestion process
     
@@ -159,12 +215,27 @@ def main(fetch_all=True, initial_download=False, limit=None):
     """
     try:
         logger.info(f"Starting music ingestion... (initial_download={initial_download}, limit={limit})")
-        print(f"🔍 DEBUG: initial_download={initial_download}, limit={limit}")
+        logger.info(f"Current working directory: {os.getcwd()}")
+        logger.info(f"Script directory: {os.path.dirname(os.path.abspath(__file__))}")
         
-        # Load tokens from file
+        # Try multiple times to load token (with debugging)
         token_info = load_token()
-        if not token_info or "refresh_token" not in token_info:
-            logger.error("No valid token found. Please log in first through the Spotify AI dashboard.")
+        logger.info(f"Token loading result: {token_info is not None}")
+        
+        if not token_info:
+            logger.error("load_token() returned None or empty dict - checking file system directly")
+            # Direct check
+            import sys
+            for path_item in [
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), "tokens.json"),
+                os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data", "tokens.json"),
+                "tokens.json"
+            ]:
+                logger.info(f"Checking: {path_item} -> exists={os.path.exists(path_item)}")
+            raise ValueError("No valid token found in tokens.json. Please authenticate first via the dashboard.")
+        
+        if "refresh_token" not in token_info:
+            logger.error(f"Token loaded but refresh_token missing. Keys available: {list(token_info.keys())}")
             raise ValueError("No valid token found in tokens.json. Please authenticate first via the dashboard.")
         
         refresh_token = token_info["refresh_token"]
@@ -179,26 +250,28 @@ def main(fetch_all=True, initial_download=False, limit=None):
         create_tables()  # Create all tables including plays
         
         # Determine what to fetch
-        # NOTE: Spotify API limits recently-played to 50 items maximum
         if initial_download:
-            logger.info(f"Initial download: Fetching Spotify recently played tracks (max 50)...")
-            print(f"📥 Fetching songs from Spotify (max 50 available)")
+            logger.info(f"Initial download: Fetching Spotify recently played tracks...")
             data = get_all_recently_played(access_token, limit=50)
         else:
             # Incremental download: fetch from last download time
             last_download = get_last_download_time()
             if last_download:
                 logger.info(f"Incremental download: Fetching new songs since {last_download}...")
-                print(f"🔄 Fetching new songs")
                 data = get_all_recently_played(access_token, limit=50)
             else:
                 logger.info("No previous download found. Fetching recently played tracks...")
-                print(f"📥 First download - fetching all available tracks (max 50)")
                 data = get_all_recently_played(access_token, limit=50)
+        
+        # Deduplicate consecutive plays (pause/resume handling)
+        items = data.get("items", [])
+        deduplicated_items = deduplicate_consecutive_plays(items)
+        data["items"] = deduplicated_items
         
         conn = sqlite3.connect(DB)
         cur = conn.cursor()
         track_ids = []
+        track_artist_map = {}
         new_plays_count = 0
         
         # Insert tracks and plays
@@ -209,10 +282,25 @@ def main(fetch_all=True, initial_download=False, limit=None):
                 played_at = item["played_at"]  # This is ISO format datetime from Spotify
                 artists = ", ".join([a["name"] for a in t["artists"]])
                 
-                # Insert track using correct column names (track_name, not name)
+                # Determine primary artist id (first listed artist)
+                primary_artist_id = None
+                if t.get("artists") and isinstance(t["artists"], list) and len(t["artists"]) > 0:
+                    primary_artist_id = t["artists"][0].get("id")
+
+                # Fetch artist genres (may be empty)
+                genre_str = None
+                try:
+                    if primary_artist_id:
+                        genres = get_artist_genres(access_token, primary_artist_id)
+                        # Pick the top genre if available, otherwise None
+                        genre_str = genres[0] if genres else None
+                except Exception:
+                    genre_str = None
+
+                # Insert track using correct column names (include genre)
                 cur.execute(
-                    "INSERT OR IGNORE INTO tracks(track_id, track_name, artist, duration_ms, popularity) VALUES (?,?,?,?,?)",
-                    (tid, t["name"], artists, t.get("duration_ms", 0), t.get("popularity", 0))
+                    "INSERT OR IGNORE INTO tracks(track_id, track_name, artist, duration_ms, popularity, genre) VALUES (?,?,?,?,?,?)",
+                    (tid, t["name"], artists, t.get("duration_ms", 0), t.get("popularity", 0), genre_str)
                 )
                 
                 # Check if this play record already exists (for incremental updates)
@@ -229,14 +317,31 @@ def main(fetch_all=True, initial_download=False, limit=None):
                 
                 if tid not in track_ids:
                     track_ids.append(tid)
+                    # remember primary artist id for potential backfill/update
+                    track_artist_map[tid] = primary_artist_id
             except KeyError as e:
                 logger.warning(f"Skipping malformed track item: missing {e}")
                 continue
         
         conn.commit()
+        # Backfill/update genre for tracks that may not have been stored (or were ignored previously)
+        try:
+            for tid in track_ids:
+                # only update if genre is missing or empty
+                cur.execute("SELECT genre FROM tracks WHERE track_id = ?", (tid,))
+                row = cur.fetchone()
+                current_genre = row[0] if row else None
+                if not current_genre:
+                    primary_artist_id = track_artist_map.get(tid)
+                    if primary_artist_id:
+                        genres = get_artist_genres(access_token, primary_artist_id)
+                        genre_str = genres[0] if genres else None
+                        if genre_str:
+                            cur.execute("UPDATE tracks SET genre = ? WHERE track_id = ?", (genre_str, tid))
+            conn.commit()
+        except Exception as e:
+            logger.warning(f"Failed to backfill genres: {e}")
         logger.info(f"Inserted {new_plays_count} new plays, {len(track_ids)} unique tracks into database")
-        print(f"✅ Downloaded {new_plays_count} new plays, {len(track_ids)} unique tracks")
-        print(f"📊 Total items fetched from Spotify: {len(data.get('items', []))}")
         
         # Fetch and store audio features in batches
         logger.info("Fetching audio features...")
@@ -273,7 +378,6 @@ def main(fetch_all=True, initial_download=False, limit=None):
                 save_download_history(latest_play, new_plays_count)
         
         logger.info("Music ingestion completed successfully")
-        print(f"✅ Ingestion complete! Downloaded {new_plays_count} new plays, fetched audio features for {len(track_ids)} tracks.")
         
     except ValueError as e:
         logger.error(f"Configuration error: {e}")

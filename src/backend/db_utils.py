@@ -53,6 +53,7 @@ def create_tables():
             mood_tag INTEGER,
             mood_when_listening INTEGER,
             theme_tag TEXT,
+            is_skipped INTEGER DEFAULT NULL,
             tagged_at DATETIME,
             FOREIGN KEY(track_id) REFERENCES tracks(track_id)
         )
@@ -69,6 +70,10 @@ def create_tables():
         """)
         
         conn.commit()
+        
+        # Run migrations to update schema if needed
+        migrate_database(cursor, conn)
+        
         conn.close()
         logger.info("Database tables created/verified successfully")
     except sqlite3.Error as e:
@@ -77,6 +82,23 @@ def create_tables():
     except Exception as e:
         logger.error(f"Unexpected error creating tables: {e}")
         raise
+
+def migrate_database(cursor, conn):
+    """Apply schema migrations to existing databases"""
+    try:
+        # Check if is_skipped column exists in plays table
+        cursor.execute("PRAGMA table_info(plays)")
+        columns = [row[1] for row in cursor.fetchall()]
+        
+        if "is_skipped" not in columns:
+            logger.info("Adding is_skipped column to plays table...")
+            cursor.execute("ALTER TABLE plays ADD COLUMN is_skipped INTEGER DEFAULT NULL")
+            conn.commit()
+            logger.info("Successfully added is_skipped column")
+    except sqlite3.Error as e:
+        logger.error(f"Migration error: {e}")
+        # Continue anyway - column might already exist
+        pass
 
 def insert_user(user_id, display_name, email):
     """Insert or update user information"""
